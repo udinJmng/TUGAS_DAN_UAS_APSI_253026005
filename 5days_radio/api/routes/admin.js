@@ -2,14 +2,12 @@ const express = require('express');
 const router  = express.Router();
 const db      = require('../db');
 
-// middleware: harus login + role admin
 function requireAdmin(req, res, next) {
   if (!req.session.user)              return res.status(401).json({ error: 'Login required.' });
   if (req.session.user.role !== 'admin') return res.status(403).json({ error: 'Admin only.' });
   next();
 }
 
-// ─── GET /api/admin/users ─── daftar semua user ───────────────────────────
 router.get('/users', requireAdmin, async (req, res) => {
   try {
     const rows = await db.query(
@@ -24,7 +22,6 @@ router.get('/users', requireAdmin, async (req, res) => {
   }
 });
 
-// ─── PATCH /api/admin/users/:id/ban ─── toggle ban ────────────────────────
 router.patch('/users/:id/ban', requireAdmin, async (req, res) => {
   try {
     const userId = req.params.id;
@@ -50,7 +47,6 @@ router.patch('/users/:id/ban', requireAdmin, async (req, res) => {
   }
 });
 
-// ─── DELETE /api/admin/songs/:id ─── hapus lagu (hard soft-delete) ─────────
 router.delete('/songs/:id', requireAdmin, async (req, res) => {
   try {
     const rows = await db.query(
@@ -67,7 +63,6 @@ router.delete('/songs/:id', requireAdmin, async (req, res) => {
   }
 });
 
-// ─── DELETE /api/admin/comments/:id ─── hapus komentar ────────────────────
 router.delete('/comments/:id', requireAdmin, async (req, res) => {
   try {
     const rows = await db.query(
@@ -84,7 +79,6 @@ router.delete('/comments/:id', requireAdmin, async (req, res) => {
   }
 });
 
-// ─── GET /api/admin/songs ─── semua lagu termasuk yg terhapus ─────────────
 router.get('/songs', requireAdmin, async (req, res) => {
   try {
     const rows = await db.query(
@@ -102,7 +96,6 @@ router.get('/songs', requireAdmin, async (req, res) => {
   }
 });
 
-// ─── GET /api/admin/comments ─── semua komentar aktif ────────────────────
 router.get('/comments', requireAdmin, async (req, res) => {
   try {
     const rows = await db.query(
