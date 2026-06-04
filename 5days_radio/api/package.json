@@ -1,18 +1,23 @@
 {
-  "name": "api",
+  "name": "5days-radio-api",
   "version": "1.0.0",
-  "description": "",
+  "description": "5Days Radio — ExpressJS REST API",
   "license": "ISC",
-  "author": "",
+  "author": "Dustine",
   "type": "commonjs",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
     "express": "^5.2.1",
+    "express-session": "^1.18.1",
     "multer": "^2.1.1",
     "mysql": "^2.18.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
   }
 }
