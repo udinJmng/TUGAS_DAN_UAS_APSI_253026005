@@ -1,3 +1,6 @@
 /5days_radio/api/node_modules
+/5days_radio/5days_web/node_modules
 .vscode/settings.json
 5days_radio/api/.env
+5days_radio/5days_web/.env
+/5days_radio/api/uploads
