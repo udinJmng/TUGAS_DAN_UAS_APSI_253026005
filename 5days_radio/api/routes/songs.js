@@ -1,7 +1,7 @@
 const express = require('express');
 const router  = express.Router();
 const db      = require('../db');
-const { uploadAudio, uploadCover } = require('../middleware/upload');
+const { uploadSong, uploadAudio } = require('../middleware/upload');
 
 function requireLogin(req, res, next) {
   if (!req.session.user) return res.status(401).json({ error: 'Login required.' });
@@ -35,9 +35,10 @@ router.get('/', async (req, res) => {
     const rows = await db.query(
       `SELECT s.*,
               u.username, u.avatar_url,
-              (SELECT COUNT(*) FROM likes    WHERE song_id = s.id)                   AS likes_count,
-              (SELECT COUNT(*) FROM reposts  WHERE song_id = s.id)                   AS reposts_count,
-              (SELECT COUNT(*) FROM comments WHERE song_id = s.id AND is_deleted = 0) AS comments_count
+              (SELECT COUNT(*) FROM likes    WHERE song_id = s.id)                    AS likes_count,
+              (SELECT COUNT(*) FROM reposts  WHERE song_id = s.id)                    AS reposts_count,
+              (SELECT COUNT(*) FROM comments WHERE song_id = s.id AND is_deleted = 0) AS comments_count,
+              (SELECT duration FROM tracks   WHERE song_id = s.id ORDER BY track_number ASC LIMIT 1) AS first_track_dur
        FROM songs s
        JOIN users u ON u.id = s.user_id
        WHERE ${where}
@@ -88,28 +89,36 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-router.post('/', requireLogin, uploadCover.single('cover'), async (req, res) => {
+router.post('/', requireLogin, uploadSong, async (req, res) => {
   try {
     const { title, type, genre, description } = req.body;
     if (!title) return res.status(400).json({ error: 'Title is required.' });
 
-    const coverUrl = req.file ? `/uploads/covers/${req.file.filename}` : null;
+    const files  = req.files || {};
+    const coverFile = files['cover']?.[0];
+    const audioFile = files['audio']?.[0];   // single audio
+
+    const coverUrl = coverFile ? `/uploads/covers/${coverFile.filename}` : null;
+    const audioUrl = audioFile ? `/uploads/audio/${audioFile.filename}` : null;
 
     const result = await db.query(
-      `INSERT INTO songs (user_id, title, type, genre, description, cover_url)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO songs (user_id, title, type, genre, description, cover_url, audio_url)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [req.session.user.id, title, type || 'single', genre || 'Other',
-       description || null, coverUrl]
+       description || null, coverUrl, audioUrl]
     );
     const songId = result.insertId;
 
+    // Album tracks — each may have its own audio field: audio_0, audio_1, ...
     const tracks = req.body.tracks ? JSON.parse(req.body.tracks) : [];
     for (let i = 0; i < tracks.length; i++) {
       const t = tracks[i];
+      const trackAudioFile = files[`audio_${i}`]?.[0];
+      const trackAudioUrl  = trackAudioFile ? `/uploads/audio/${trackAudioFile.filename}` : null;
       await db.query(
-        `INSERT INTO tracks (song_id, track_number, title, duration)
-         VALUES (?, ?, ?, ?)`,
-        [songId, i + 1, t.title || '', t.dur || null]
+        `INSERT INTO tracks (song_id, track_number, title, duration, audio_url)
+         VALUES (?, ?, ?, ?, ?)`,
+        [songId, i + 1, t.title || '', t.dur || null, trackAudioUrl]
       );
     }
 
@@ -163,7 +172,7 @@ router.post('/:id/audio', requireLogin, uploadAudio.single('audio'), async (req,
   }
 });
 
-router.put('/:id', requireLogin, uploadCover.single('cover'), async (req, res) => {
+router.put('/:id', requireLogin, uploadSong, async (req, res) => {
   try {
     const song = await db.query(
       'SELECT * FROM songs WHERE id = ? AND is_deleted = 0 LIMIT 1',
@@ -175,15 +184,18 @@ router.put('/:id', requireLogin, uploadCover.single('cover'), async (req, res) =
     }
 
     const { title, type, genre, description } = req.body;
-    const coverUrl = req.file
-      ? `/uploads/covers/${req.file.filename}`
-      : song[0].cover_url;
+    const files    = req.files || {};
+    const coverFile = files['cover']?.[0];
+    const audioFile = files['audio']?.[0];
+
+    const coverUrl = coverFile ? `/uploads/covers/${coverFile.filename}` : song[0].cover_url;
+    const audioUrl = audioFile ? `/uploads/audio/${audioFile.filename}` : song[0].audio_url;
 
     await db.query(
-      `UPDATE songs SET title = ?, type = ?, genre = ?, description = ?, cover_url = ?
+      `UPDATE songs SET title = ?, type = ?, genre = ?, description = ?, cover_url = ?, audio_url = ?
        WHERE id = ?`,
       [title || song[0].title, type || song[0].type, genre || song[0].genre,
-       description ?? song[0].description, coverUrl, req.params.id]
+       description ?? song[0].description, coverUrl, audioUrl, req.params.id]
     );
 
     if (req.body.credits) {
