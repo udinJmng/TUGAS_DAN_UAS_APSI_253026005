@@ -109,12 +109,16 @@ router.post('/', requireLogin, uploadSong, async (req, res) => {
     );
     const songId = result.insertId;
 
-    // Album tracks — each may have its own audio field: audio_0, audio_1, ...
+    console.log('[upload] type:', type, '| body.tracks raw:', req.body.tracks);
+    console.log('[upload] files received:', Object.keys(req.files || {}));
     const tracks = req.body.tracks ? JSON.parse(req.body.tracks) : [];
+    console.log('[upload] parsed tracks:', JSON.stringify(tracks));
     for (let i = 0; i < tracks.length; i++) {
       const t = tracks[i];
       const trackAudioFile = files[`audio_${i}`]?.[0];
       const trackAudioUrl  = trackAudioFile ? `/uploads/audio/${trackAudioFile.filename}` : null;
+      // Skip completely empty rows (no title and no audio)
+      if (!t.title && !trackAudioUrl) continue;
       await db.query(
         `INSERT INTO tracks (song_id, track_number, title, duration, audio_url)
          VALUES (?, ?, ?, ?, ?)`,
