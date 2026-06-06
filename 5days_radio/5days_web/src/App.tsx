@@ -33,7 +33,7 @@ type AdminTab = 'users' | 'songs' | 'comments'
 
 interface PlayerState {
   queue: Song[]; index: number; isPlaying: boolean; progress: number
-  currentSong: Song | null
+  currentSong: Song | null; trackIndex: number
 }
 interface AppState {
   currentUser: User | null; users: User[]; songs: Song[]
@@ -123,7 +123,7 @@ type Action =
   | { type: 'TOGGLE_REPOST'; songId: number; userId: number }
   | { type: 'POST_COMMENT'; songId: number; comment: Comment }
   | { type: 'DELETE_COMMENT'; songId: number; commentId: number }
-  | { type: 'PLAY_SONG'; songId: number }
+  | { type: 'PLAY_SONG'; songId: number; trackIndex?: number }
   | { type: 'TOGGLE_PLAY' }
   | { type: 'NEXT_SONG' }
   | { type: 'PREV_SONG' }
@@ -140,16 +140,15 @@ type Action =
   | { type: 'SET_EDIT_SONG'; id: number | null }
   | { type: 'REPLACE_SONGS'; songs: Song[] }
   | { type: 'SET_USERS'; users: User[] }
+  | { type: 'UPDATE_DETAIL_SONG'; song: Song }
 
 const INITIAL_STATE: AppState = {
-  // In API mode start with empty data — gets loaded from server after login
-  // In mock mode keep the full preset data
   currentUser: null,
   users: USE_API ? [] : INITIAL_USERS,
   songs: USE_API ? [] : INITIAL_SONGS,
   page: 'home', prevPage: 'home', navHistory: ['home'], navPos: 0,
   currentDetailSong: null, adminTab: 'users',
-  player: { queue: [], index: -1, isPlaying: false, progress: 0, currentSong: null },
+  player: { queue: [], index: -1, isPlaying: false, progress: 0, currentSong: null, trackIndex: 0 },
   toastMsg: '', toastShow: false, nextSongId: 13, nextUserId: 8, nextCommentId: 100,
   editSongId: null,
 }
@@ -207,25 +206,36 @@ function reducer(state: AppState, action: Action): AppState {
     case 'POST_COMMENT': {
       const songs = state.songs.map(s =>
         s.id === action.songId ? { ...s, comments: [...s.comments, action.comment] } : s)
+      // Preserve currentDetailSong's tracks — songs[] from list endpoint has no tracks
       const det = state.currentDetailSong?.id === action.songId
-        ? songs.find(s => s.id === action.songId) ?? state.currentDetailSong : state.currentDetailSong
+        ? { ...(songs.find(s => s.id === action.songId) ?? state.currentDetailSong!), tracks: state.currentDetailSong?.tracks ?? [] }
+        : state.currentDetailSong
       return { ...state, songs, currentDetailSong: det ?? null, nextCommentId: state.nextCommentId + 1 }
     }
 
     case 'DELETE_COMMENT': {
       const songs = state.songs.map(s =>
         s.id === action.songId ? { ...s, comments: s.comments.map(c => c.id === action.commentId ? { ...c, deleted: true } : c) } : s)
+      // Preserve currentDetailSong's tracks
       const det = state.currentDetailSong?.id === action.songId
-        ? songs.find(s => s.id === action.songId) ?? state.currentDetailSong : state.currentDetailSong
+        ? { ...(songs.find(s => s.id === action.songId) ?? state.currentDetailSong!), tracks: state.currentDetailSong?.tracks ?? [] }
+        : state.currentDetailSong
       return { ...state, songs, currentDetailSong: det ?? null }
     }
+    case 'UPDATE_DETAIL_SONG':
+      return { ...state, currentDetailSong: action.song }
 
     case 'PLAY_SONG': {
       const queue = state.songs.filter(s => !s.deleted)
       const idx   = queue.findIndex(s => s.id === action.songId)
       if (idx === -1) return state
       const songs = state.songs.map(s => s.id === action.songId ? { ...s, plays: s.plays + 1 } : s)
-      return { ...state, songs, player: { queue, index: idx, isPlaying: true, progress: 0, currentSong: queue[idx] } }
+      // Merge tracks from currentDetailSong — list endpoint songs have no tracks[]
+      const baseSong = queue[idx]
+      const detailTracks = state.currentDetailSong?.id === action.songId ? state.currentDetailSong.tracks : null
+      const currentSong = detailTracks?.length ? { ...baseSong, tracks: detailTracks } : baseSong
+      const trackIndex = action.trackIndex ?? 0
+      return { ...state, songs, player: { queue, index: idx, isPlaying: true, progress: 0, currentSong, trackIndex } }
     }
 
     case 'TOGGLE_PLAY':
@@ -235,14 +245,14 @@ function reducer(state: AppState, action: Action): AppState {
       const { queue, index } = state.player
       if (!queue.length) return state
       const nextIdx = (index + 1) % queue.length
-      return { ...state, player: { ...state.player, index: nextIdx, currentSong: queue[nextIdx], progress: 0, isPlaying: true } }
+      return { ...state, player: { ...state.player, index: nextIdx, currentSong: queue[nextIdx], progress: 0, isPlaying: true, trackIndex: 0 } }
     }
 
     case 'PREV_SONG': {
       const { queue, index } = state.player
       if (!queue.length) return state
       const prevIdx = (index - 1 + queue.length) % queue.length
-      return { ...state, player: { ...state.player, index: prevIdx, currentSong: queue[prevIdx], progress: 0, isPlaying: true } }
+      return { ...state, player: { ...state.player, index: prevIdx, currentSong: queue[prevIdx], progress: 0, isPlaying: true, trackIndex: 0 } }
     }
 
     case 'SET_PROGRESS':
@@ -628,7 +638,7 @@ function SongDetailPage({ song, songs, user, player, dispatch, onLike, onRepost,
   song: Song; songs: Song[]; user: User; player: PlayerState; dispatch: React.Dispatch<Action>
   onLike:(id:number)=>void; onRepost:(id:number)=>void
   onComment:(songId:number,text:string)=>void; onDeleteComment:(songId:number,commentId:number)=>void
-  onPlay:(id:number)=>void
+  onPlay:(id:number, trackIndex?:number)=>void
 }) {
   const [commentText, setCommentText] = useState('')
   const [c1, c2] = GENRE_COLORS[song.genre] ?? GENRE_COLORS['Other']
@@ -643,12 +653,11 @@ function SongDetailPage({ song, songs, user, player, dispatch, onLike, onRepost,
     setCommentText('')
   }
 
-  // aggregate credits
-  let allCredits: Credit[] = []
-  if (song.tracks.length > 0) {
-    song.tracks.forEach(t => t.credits?.forEach(c => { if (!allCredits.find(x=>x.role===c.role&&x.name===c.name)) allCredits.push(c) }))
-  }
-  if (allCredits.length === 0 && song.credits) allCredits = song.credits
+  // aggregate credits — song-level credits first, then per-track credits (deduped)
+  const allCredits: Credit[] = [...(song.credits ?? [])]
+  song.tracks.forEach(t => t.credits?.forEach(c => {
+    if (c.name && !allCredits.find(x => x.role===c.role && x.name===c.name)) allCredits.push(c)
+  }))
   const grouped = allCredits.reduce<Record<string,string[]>>((acc, c) => {
     if (!acc[c.role]) acc[c.role] = []
     if (!acc[c.role].includes(c.name)) acc[c.role].push(c.name)
@@ -703,26 +712,10 @@ function SongDetailPage({ song, songs, user, player, dispatch, onLike, onRepost,
       {/* Description */}
       {song.desc && <div style={{ padding:'0 24px 20px',color:'var(--muted)',fontSize:13,maxWidth:600,lineHeight:1.6 }}>{song.desc}</div>}
 
-      {/* Album tracks */}
-      {song.type==='album' && song.tracks.length>0 && (
-        <>
-          <div className="song-detail-section-title" style={{ paddingTop:0,paddingBottom:12 }}>Tracks</div>
-          <div className="album-tracklist">
-            {song.tracks.map((t,i) => (
-              <div key={i} className="album-track-row">
-                <span className="album-track-num">{i+1}</span>
-                <div className="album-track-title">{t.title}</div>
-                <span className="album-track-dur">{t.dur}</span>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-
       {/* Credits */}
       {Object.keys(grouped).length > 0 && (
         <>
-          <div className="song-detail-section-title" style={{ paddingTop:16,paddingBottom:12 }}>Credits</div>
+          <div className="song-detail-section-title" style={{ paddingTop:0,paddingBottom:12 }}>Credits</div>
           <div className="credits-grid">
             {Object.entries(grouped).map(([role,names]) => (
               <div key={role} style={{ minWidth:140 }}>
@@ -759,24 +752,26 @@ function SongDetailPage({ song, songs, user, player, dispatch, onLike, onRepost,
             <span className="tracklist-dur">{song.tracks?.[0]?.dur ?? ''}</span>
           </div>
         ) : (
-          // Album — one row per track
-          tracklist.map((t,i) => {
-            const tPlaying = player.currentSong?.id===t.id && player.isPlaying
-            const tLiked   = t.likes.includes(user.id)
-            const trackDur = t.tracks?.[0]?.dur ?? ''
+          // Album — show tracks stored in DB (song.tracks[])
+          song.tracks.length > 0 ? song.tracks.map((t, i) => {
+            const isActive = player.currentSong?.id === song.id && (player.trackIndex ?? 0) === i && player.isPlaying
             return (
-              <div key={t.id} className={`tracklist-row${tPlaying?' playing':''}`} onClick={()=>onPlay(t.id)}>
-                <span className="tracklist-num">{tPlaying ? <i className="fas fa-volume-high" style={{ fontSize:13,color:'var(--gold)' }} /> : i+1}</span>
-                <div className="tracklist-info"><div className="tracklist-title">{t.title}</div><div className="tracklist-artist">{t.artist}</div></div>
-                <div className="tracklist-actions">
-                  <button className={`action-btn-icon${tLiked?' active':''}`} onClick={e=>{e.stopPropagation();onLike(t.id)}} style={{ fontSize:12,gap:4 }}>
-                    <i className={`${tLiked?'fas':'far'} fa-heart`} style={{ fontSize:14 }} /><span>{t.likes.length}</span>
-                  </button>
-                </div>
-                <span className="tracklist-dur">{trackDur}</span>
+            <div key={i} className={`tracklist-row${isActive ? ' playing' : ''}`} onClick={()=>{ if(t.audio_url) onPlay(song.id, i) }}>
+              <span className="tracklist-num">
+                {isActive
+                  ? <i className="fas fa-volume-high" style={{ fontSize:13,color:'var(--gold)' }} />
+                  : i+1}
+              </span>
+              <div className="tracklist-info">
+                <div className="tracklist-title">{t.title}</div>
+                <div className="tracklist-artist">{song.artist}</div>
               </div>
-            )
-          })
+              <div className="tracklist-actions" />
+              <span className="tracklist-dur">{t.dur ?? ''}</span>
+            </div>
+          )}) : (
+            <p style={{ color:'var(--muted)',fontSize:13,padding:'12px 0' }}>No tracks yet.</p>
+          )
         )}
       </div>
 
@@ -830,6 +825,14 @@ function UploadPage({ user, songs, editSongId, dispatch, toast }: {
     return [{ id:0, title:'', audioName:'', audioData:'', audioFile:null, dur:'', credits:[{ role:'Producer', name:user.name }], open:true }]
   })
 
+  const [songCredits, setSongCredits] = useState<Credit[]>(() => {
+    if (editSong) return editSong.credits ?? []
+    return [{ role: 'Producer', name: '' }]
+  })
+  const addSongCredit    = () => setSongCredits(p => [...p, { role: 'Producer', name: '' }])
+  const updateSongCredit = (i: number, patch: Partial<Credit>) => setSongCredits(p => p.map((c,ci) => ci===i ? {...c,...patch} : c))
+  const removeSongCredit = (i: number) => setSongCredits(p => p.filter((_,ci) => ci!==i))
+
   const isAlbum = type === 'album'
   const coverRef = useRef<HTMLInputElement>(null)
 
@@ -876,12 +879,21 @@ function UploadPage({ user, songs, editSongId, dispatch, toast }: {
   const onSubmit = async () => {
     if (!title) { toast('⚠️ Title required'); return }
 
-    const allC: Credit[] = []
+    // Song-level credits + per-track credits merged (deduped)
+    const allC: Credit[] = [...songCredits.filter(c => c.name)]
     tracks.forEach(t => t.credits.forEach(c => { if (c.name && !allC.find(x=>x.role===c.role&&x.name===c.name)) allC.push(c) }))
 
     // For singles, always include a track row so dur gets stored in DB
+    // For albums: include tracks that have a title OR an audio file; auto-fill title from filename if blank
     const finalTracks = isAlbum
-      ? tracks.filter(t=>t.title).map(t=>({ title:t.title, dur: t.dur || '', audioName:t.audioName, credits:t.credits }))
+      ? tracks
+          .filter(t => t.title || t.audioName)
+          .map(t => ({
+            title: t.title || t.audioName.replace(/\.[^/.]+$/, '') || 'Untitled',
+            dur: t.dur || '',
+            audioName: t.audioName,
+            credits: t.credits,
+          }))
       : [{ title: tracks[0]?.title || title, dur: tracks[0]?.dur || '', audioName: tracks[0]?.audioName || '', credits: tracks[0]?.credits || allC }]
     if (isAlbum && finalTracks.length === 0) { toast('⚠️ Add at least one track'); return }
 
@@ -898,11 +910,12 @@ function UploadPage({ user, songs, editSongId, dispatch, toast }: {
         fd.append('cover', new Blob([u8], {type:mime}), 'cover.jpg')
       }
 
-      // audio files — single gets field 'audio', album tracks get 'audio_0', 'audio_1', ...
+      // audio files — single: field 'audio', album tracks: 'audio_0', 'audio_1', ...
       if (isAlbum) {
-        finalTracks.forEach((_t, i) => {
-          const trackForm = tracks.find(tf => tf.title === _t.title)
-          if (trackForm?.audioFile) fd.append(`audio_${i}`, trackForm.audioFile)
+        // Must use same filter as finalTracks so indices stay in sync
+        const albumTracks = tracks.filter(t => t.title || t.audioName)
+        albumTracks.forEach((trackForm, i) => {
+          if (trackForm.audioFile) fd.append(`audio_${i}`, trackForm.audioFile)
         })
       } else {
         const audioFile = tracks[0]?.audioFile
@@ -1007,6 +1020,21 @@ function UploadPage({ user, songs, editSongId, dispatch, toast }: {
           ))}
         </div>
 
+        {/* Song-level Credits */}
+        <div className="form-row" style={{ marginTop:20, marginBottom:0 }}>
+          <div style={{ display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10 }}>
+            <label className="form-label" style={{ marginBottom:0 }}>Credits</label>
+            <button className="add-track-btn" style={{ width:'auto',padding:0 }} onClick={addSongCredit}><i className="fas fa-circle-plus" style={{ fontSize:15 }} />Add credit</button>
+          </div>
+          {songCredits.map((c, i) => (
+            <div key={i} className="credit-item" style={{ marginBottom:8 }}>
+              <select className="credit-role-select" value={c.role} onChange={e=>updateSongCredit(i,{role:e.target.value})}>{CREDIT_ROLES.map(r=><option key={r}>{r}</option>)}</select>
+              <input className="credit-name-input" placeholder="Name…" value={c.name} onChange={e=>updateSongCredit(i,{name:e.target.value})} />
+              <button style={{ color:'var(--subtle)',background:'none',border:'none',cursor:'pointer' }} onClick={()=>removeSongCredit(i)}><i className="fas fa-circle-minus" style={{ fontSize:14 }} /></button>
+            </div>
+          ))}
+        </div>
+
         <div style={{ display:'flex',gap:10,marginTop:20 }}>
           <button className="btn btn-green" onClick={onSubmit}><i className={`fas ${editSong?'fa-floppy-disk':'fa-cloud-arrow-up'}`} />{editSong?'Save Changes':'Upload'}</button>
           {editSong && <button className="btn btn-outline" onClick={()=>{dispatch({type:'SET_EDIT_SONG',id:null});dispatch({type:'NAV',page:'profile'})}}>Cancel</button>}
@@ -1027,9 +1055,11 @@ function PlayerBar({ player, user, dispatch }: { player: PlayerState; user: User
   const [muted, setMuted]       = useState(false)
   const liked = user && s ? s.likes.includes(user.id) : false
 
-  const audioSrc = s?.audio_url && s.audio_url !== resolveUrl(null)
-    ? s.audio_url
-    : (s?.tracks?.[0]?.audioData ?? s?.tracks?.[0]?.audio_url ?? '')
+  const { trackIndex } = player
+  const activeTrack = s?.tracks?.[trackIndex] ?? s?.tracks?.[0]
+  const audioSrc = s?.type === 'single'
+    ? (s.audio_url && s.audio_url !== resolveUrl(null) ? s.audio_url : (activeTrack?.audioData ?? activeTrack?.audio_url ?? ''))
+    : (activeTrack?.audio_url ?? activeTrack?.audioData ?? '')
 
   // ── Play / pause ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -1057,7 +1087,7 @@ function PlayerBar({ player, user, dispatch }: { player: PlayerState; user: User
     dispatch({ type: 'SET_PROGRESS', progress: 0 })
     if (audioSrc) { audio.src = audioSrc; audio.load(); if (isPlaying) audio.play().catch(()=>{}) }
     else audio.removeAttribute('src')
-  }, [s?.id])
+  }, [s?.id, trackIndex])
 
   // ── Events ─────────────────────────────────────────────────────────────
   const handleLoadedMetadata = () => {
@@ -1098,8 +1128,8 @@ function PlayerBar({ player, user, dispatch }: { player: PlayerState; user: User
           {s?.cover ? <img src={s.cover} alt="" /> : <div style={{ width:'100%',height:'100%',display:'flex',alignItems:'center',justifyContent:'center',background:'var(--surface3)' }}><i className="fas fa-music" style={{ color:'var(--muted)',fontSize:18 }} /></div>}
         </div>
         <div className="player-track-info">
-          <div className="player-title">{s?.title ?? '—'}</div>
-          <div className="player-artist">{s?.artist ?? '—'}</div>
+          <div className="player-title">{s?.type === 'album' && activeTrack?.title ? activeTrack.title : (s?.title ?? '—')}</div>
+          <div className="player-artist">{s?.type === 'album' && activeTrack?.title ? s?.title : (s?.artist ?? '—')}</div>
         </div>
         {user && s && <button className={`player-like${liked?' liked':''}`} onClick={()=>dispatch({type:'PLAYER_LIKE',userId:user.id})}><i className={`${liked?'fas':'far'} fa-heart`} /></button>}
       </div>
@@ -1161,8 +1191,8 @@ function apiSongToLocal(s: ApiSong): Song {
     deleted:   Boolean(s.is_deleted),
     tracks:    (s.tracks ?? []).length > 0
       ? (s.tracks ?? []).map(t => ({ title:t.title, dur:t.duration ?? '', audio_url:resolveUrl(t.audio_url) }))
-      // list endpoint has no tracks[] but gives first_track_dur — create synthetic entry
-      : s.first_track_dur ? [{ title: s.title, dur: s.first_track_dur, audio_url: resolveUrl(s.audio_url) }] : [],
+      // list endpoint has no tracks[] but gives first_track_dur — create synthetic entry for singles only
+      : (s.type === 'single' && s.first_track_dur) ? [{ title: s.title, dur: s.first_track_dur, audio_url: resolveUrl(s.audio_url) }] : [],
     credits: (s.credits ?? []).map(c => ({ role: c.role, name: c.name })),
   }
 }
@@ -1292,8 +1322,8 @@ export default function App() {
   }, [USE_API])
 
   // ─── Song handlers ───────────────────────────────────────────────────────
-  const handlePlaySong = useCallback((songId: number) => {
-    dispatch({ type:'PLAY_SONG', songId })
+  const handlePlaySong = useCallback((songId: number, trackIndex?: number) => {
+    dispatch({ type:'PLAY_SONG', songId, trackIndex })
     // increment play count in API silently
     if (USE_API) apiCall(() => songApi.get(songId))
   }, [USE_API])
@@ -1419,15 +1449,20 @@ export default function App() {
     }
   }, [USE_API, user, toast])
 
-  // ─── Load song detail comments from API ──────────────────────────────────
+  // ─── Load song detail (tracks + comments) from API ─────────────────────
   const handleOpenSong = useCallback(async (song: Song) => {
     dispatch({ type:'OPEN_SONG', song })
     if (!USE_API) return
-    // Fetch comments and update the detail song
+    // Fetch full song detail so tracks are populated (list endpoint omits them)
+    const full = await apiCall(() => songApi.get(song.id))
+    if (full) {
+      const fullLocal = apiSongToLocal(full)
+      dispatch({ type:'UPDATE_DETAIL_SONG', song: fullLocal })
+    }
+    // Fetch comments separately
     const comments = await apiCall(() => interactionApi.getComments(song.id))
     if (comments) {
       const converted: Comment[] = comments.map(c => apiCommentToLocal(c, song.id))
-      // patch comments into the song in state
       dispatch({ type:'POST_COMMENT', songId: song.id, comment: converted[0] ?? { id:-1, userId:0, user:'', avatar:'', text:'__NOOP__', ts:0, deleted:true } })
     }
   }, [USE_API])
@@ -1476,7 +1511,7 @@ export default function App() {
               <Avatar user={user} />
               <div className="sidebar-user-info">
                 <div className="name">{user.name}</div>
-                <div className="sub">{user.role==='admin'?'⭐ Admin':'Free Member'}</div>
+                <div className="sub">{user.role==='admin'?'Admin':'Free Member'}</div>
               </div>
             </div>
           </div>
