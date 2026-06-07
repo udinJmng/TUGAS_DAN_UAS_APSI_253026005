@@ -2,6 +2,7 @@ const express = require('express');
 const router  = express.Router();
 const bcrypt  = require('bcrypt');
 const db      = require('../db');
+const { uploadAvatar } = require('../middleware/upload');
 
 function requireLogin(req, res, next) {
   if (!req.session.user) return res.status(401).json({ error: 'Login required.' });
@@ -24,31 +25,52 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-router.put('/me', requireLogin, async (req, res) => {
+router.put('/me', requireLogin, uploadAvatar, async (req, res) => {
   try {
-    const { first_name, last_name, username, bio, avatar_url,
+    const { first_name, last_name, username, bio, name,
             old_password, new_password } = req.body;
     const userId = req.session.user.id;
+
+    const rows = await db.query('SELECT * FROM users WHERE id = ? LIMIT 1', [userId]);
+    if (!rows.length) return res.status(404).json({ error: 'User not found.' });
+    const current = rows[0];
+
+    let fn = first_name;
+    let ln = last_name;
+    if (!fn && name) {
+      const parts = String(name).trim().split(/\s+/);
+      fn = parts[0];
+      ln = parts.slice(1).join(' ') || parts[0];
+    }
+
+    let avatarUrl = current.avatar_url;
+    if (req.file) avatarUrl = `/uploads/avatars/${req.file.filename}`;
 
     await db.query(
       `UPDATE users SET first_name = ?, last_name = ?, username = ?,
        bio = ?, avatar_url = ? WHERE id = ?`,
-      [first_name, last_name, username, bio || null, avatar_url || null, userId]
+      [
+        fn ?? current.first_name,
+        ln ?? current.last_name,
+        username ?? current.username,
+        bio ?? current.bio,
+        avatarUrl,
+        userId,
+      ]
     );
 
     if (old_password && new_password) {
-      const rows = await db.query('SELECT password FROM users WHERE id = ?', [userId]);
-      const match = await bcrypt.compare(old_password, rows[0].password);
+      const match = await bcrypt.compare(old_password, current.password);
       if (!match) return res.status(400).json({ error: 'Old password is incorrect.' });
       const hash = await bcrypt.hash(new_password, 10);
       await db.query('UPDATE users SET password = ? WHERE id = ?', [hash, userId]);
     }
 
-    req.session.user.username = username;
-    res.json({ message: 'Profile updated.' });
+    req.session.user.username = username ?? current.username;
+    res.json({ message: 'Profile updated.', avatar_url: avatarUrl });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Server error.' });
+    res.status(500).json({ error: err.message || 'Server error.' });
   }
 });
 

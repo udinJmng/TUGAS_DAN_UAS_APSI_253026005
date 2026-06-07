@@ -7,25 +7,48 @@ function requireLogin(req, res, next) {
   next();
 }
 
+function trackScopeClause(trackId) {
+  return trackId ? 'track_id = ?' : 'track_id IS NULL';
+}
+
 router.post('/songs/:id/like', requireLogin, async (req, res) => {
   try {
     const userId = req.session.user.id;
     const songId = req.params.id;
+    const trackId = req.body.track_id ? Number(req.body.track_id) : null;
+    const scope = trackScopeClause(trackId);
+    const scopeParams = trackId ? [userId, songId, trackId] : [userId, songId];
 
     const existing = await db.query(
-      'SELECT id FROM likes WHERE user_id = ? AND song_id = ? LIMIT 1',
-      [userId, songId]
+      `SELECT id FROM likes WHERE user_id = ? AND song_id = ? AND ${scope} LIMIT 1`,
+      scopeParams
     );
 
     if (existing.length) {
-      await db.query('DELETE FROM likes WHERE user_id = ? AND song_id = ?', [userId, songId]);
-      const [{ total }] = await db.query('SELECT COUNT(*) AS total FROM likes WHERE song_id = ?', [songId]);
-      return res.json({ liked: false, likes_count: total });
+      await db.query(
+        `DELETE FROM likes WHERE user_id = ? AND song_id = ? AND ${scope}`,
+        scopeParams
+      );
+      const [{ total }] = await db.query(
+        `SELECT COUNT(*) AS total FROM likes WHERE song_id = ? AND ${scope}`,
+        trackId ? [songId, trackId] : [songId]
+      );
+      return res.json({ liked: false, likes_count: total, track_id: trackId });
     }
 
-    await db.query('INSERT INTO likes (user_id, song_id) VALUES (?, ?)', [userId, songId]);
-    const [{ total }] = await db.query('SELECT COUNT(*) AS total FROM likes WHERE song_id = ?', [songId]);
-    res.json({ liked: true, likes_count: total });
+    if (trackId) {
+      await db.query(
+        'INSERT INTO likes (user_id, song_id, track_id) VALUES (?, ?, ?)',
+        [userId, songId, trackId]
+      );
+    } else {
+      await db.query('INSERT INTO likes (user_id, song_id) VALUES (?, ?)', [userId, songId]);
+    }
+    const [{ total }] = await db.query(
+      `SELECT COUNT(*) AS total FROM likes WHERE song_id = ? AND ${scope}`,
+      trackId ? [songId, trackId] : [songId]
+    );
+    res.json({ liked: true, likes_count: total, track_id: trackId });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error.' });
@@ -35,15 +58,20 @@ router.post('/songs/:id/like', requireLogin, async (req, res) => {
 router.get('/songs/:id/likes', requireLogin, async (req, res) => {
   try {
     const userId = req.session.user.id;
+    const songId = req.params.id;
+    const trackId = req.query.track_id ? Number(req.query.track_id) : null;
+    const scope = trackScopeClause(trackId);
+    const scopeParams = trackId ? [userId, songId, trackId] : [userId, songId];
+
     const existing = await db.query(
-      'SELECT id FROM likes WHERE user_id = ? AND song_id = ? LIMIT 1',
-      [userId, req.params.id]
+      `SELECT id FROM likes WHERE user_id = ? AND song_id = ? AND ${scope} LIMIT 1`,
+      scopeParams
     );
     const [{ total }] = await db.query(
-      'SELECT COUNT(*) AS total FROM likes WHERE song_id = ?',
-      [req.params.id]
+      `SELECT COUNT(*) AS total FROM likes WHERE song_id = ? AND ${scope}`,
+      trackId ? [songId, trackId] : [songId]
     );
-    res.json({ liked: existing.length > 0, likes_count: total });
+    res.json({ liked: existing.length > 0, likes_count: total, track_id: trackId });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error.' });
@@ -54,21 +82,40 @@ router.post('/songs/:id/repost', requireLogin, async (req, res) => {
   try {
     const userId = req.session.user.id;
     const songId = req.params.id;
+    const trackId = req.body.track_id ? Number(req.body.track_id) : null;
+    const scope = trackScopeClause(trackId);
+    const scopeParams = trackId ? [userId, songId, trackId] : [userId, songId];
 
     const existing = await db.query(
-      'SELECT id FROM reposts WHERE user_id = ? AND song_id = ? LIMIT 1',
-      [userId, songId]
+      `SELECT id FROM reposts WHERE user_id = ? AND song_id = ? AND ${scope} LIMIT 1`,
+      scopeParams
     );
 
     if (existing.length) {
-      await db.query('DELETE FROM reposts WHERE user_id = ? AND song_id = ?', [userId, songId]);
-      const [{ total }] = await db.query('SELECT COUNT(*) AS total FROM reposts WHERE song_id = ?', [songId]);
-      return res.json({ reposted: false, reposts_count: total });
+      await db.query(
+        `DELETE FROM reposts WHERE user_id = ? AND song_id = ? AND ${scope}`,
+        scopeParams
+      );
+      const [{ total }] = await db.query(
+        `SELECT COUNT(*) AS total FROM reposts WHERE song_id = ? AND ${scope}`,
+        trackId ? [songId, trackId] : [songId]
+      );
+      return res.json({ reposted: false, reposts_count: total, track_id: trackId });
     }
 
-    await db.query('INSERT INTO reposts (user_id, song_id) VALUES (?, ?)', [userId, songId]);
-    const [{ total }] = await db.query('SELECT COUNT(*) AS total FROM reposts WHERE song_id = ?', [songId]);
-    res.json({ reposted: true, reposts_count: total });
+    if (trackId) {
+      await db.query(
+        'INSERT INTO reposts (user_id, song_id, track_id) VALUES (?, ?, ?)',
+        [userId, songId, trackId]
+      );
+    } else {
+      await db.query('INSERT INTO reposts (user_id, song_id) VALUES (?, ?)', [userId, songId]);
+    }
+    const [{ total }] = await db.query(
+      `SELECT COUNT(*) AS total FROM reposts WHERE song_id = ? AND ${scope}`,
+      trackId ? [songId, trackId] : [songId]
+    );
+    res.json({ reposted: true, reposts_count: total, track_id: trackId });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error.' });

@@ -6,6 +6,19 @@ const ensureDir = (dir) => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 };
 
+// ─── Avatar storage ────────────────────────────────────────────────────────
+const avatarStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    const dir = path.join(__dirname, '..', 'uploads', 'avatars');
+    ensureDir(dir);
+    cb(null, dir);
+  },
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, `avatar_${Date.now()}_${Math.random().toString(36).slice(2)}${ext}`);
+  },
+});
+
 // ─── Cover storage ─────────────────────────────────────────────────────────
 const coverStorage = multer.diskStorage({
   destination: (_req, _file, cb) => {
@@ -90,4 +103,14 @@ const uploadSong = multer({
   ...Array.from({ length: 50 }, (_, i) => ({ name: `audio_${i}`, maxCount: 1 })),
 ]);
 
-module.exports = { uploadCover, uploadAudio, uploadSong };
+const uploadAvatar = multer({
+  storage: avatarStorage,
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (IMAGE_EXTS.has(ext)) return cb(null, true);
+    cb(new Error('Avatar must be JPG, PNG, or WEBP'));
+  },
+  limits: { fileSize: 5 * 1024 * 1024 },
+}).single('avatar');
+
+module.exports = { uploadCover, uploadAudio, uploadSong, uploadAvatar };

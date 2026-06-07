@@ -70,10 +70,59 @@ router.get('/:id', async (req, res) => {
 
     const song = rows[0];
 
-    song.tracks = await db.query(
+    const trackRows = await db.query(
       'SELECT * FROM tracks WHERE song_id = ? ORDER BY track_number ASC',
       [song.id]
     );
+    const userId = req.session?.user?.id ?? null;
+    for (const t of trackRows) {
+      const [{ likes_count }] = await db.query(
+        'SELECT COUNT(*) AS likes_count FROM likes WHERE song_id = ? AND track_id = ?',
+        [song.id, t.id]
+      );
+      const [{ reposts_count }] = await db.query(
+        'SELECT COUNT(*) AS reposts_count FROM reposts WHERE song_id = ? AND track_id = ?',
+        [song.id, t.id]
+      );
+      t.likes_count = likes_count;
+      t.reposts_count = reposts_count;
+      if (userId) {
+        const liked = await db.query(
+          'SELECT id FROM likes WHERE user_id = ? AND song_id = ? AND track_id = ? LIMIT 1',
+          [userId, song.id, t.id]
+        );
+        const reposted = await db.query(
+          'SELECT id FROM reposts WHERE user_id = ? AND song_id = ? AND track_id = ? LIMIT 1',
+          [userId, song.id, t.id]
+        );
+        t.liked_by_me = liked.length > 0;
+        t.reposted_by_me = reposted.length > 0;
+      }
+    }
+    song.tracks = trackRows;
+
+    const [{ album_likes }] = await db.query(
+      'SELECT COUNT(*) AS album_likes FROM likes WHERE song_id = ? AND track_id IS NULL',
+      [song.id]
+    );
+    const [{ album_reposts }] = await db.query(
+      'SELECT COUNT(*) AS album_reposts FROM reposts WHERE song_id = ? AND track_id IS NULL',
+      [song.id]
+    );
+    song.album_likes_count = album_likes;
+    song.album_reposts_count = album_reposts;
+    if (userId) {
+      const albumLiked = await db.query(
+        'SELECT id FROM likes WHERE user_id = ? AND song_id = ? AND track_id IS NULL LIMIT 1',
+        [userId, song.id]
+      );
+      const albumReposted = await db.query(
+        'SELECT id FROM reposts WHERE user_id = ? AND song_id = ? AND track_id IS NULL LIMIT 1',
+        [userId, song.id]
+      );
+      song.album_liked_by_me = albumLiked.length > 0;
+      song.album_reposted_by_me = albumReposted.length > 0;
+    }
 
     song.credits = await db.query(
       'SELECT * FROM credits WHERE song_id = ? ORDER BY id ASC',
@@ -116,18 +165,30 @@ router.post('/', requireLogin, uploadSong, async (req, res) => {
       const t = tracks[i];
       const trackAudioFile = files[`audio_${i}`]?.[0];
       const trackAudioUrl  = trackAudioFile ? `/uploads/audio/${trackAudioFile.filename}` : null;
-      await db.query(
+      const trackResult = await db.query(
         `INSERT INTO tracks (song_id, track_number, title, duration, audio_url)
          VALUES (?, ?, ?, ?, ?)`,
         [songId, i + 1, t.title || '', t.dur || null, trackAudioUrl]
       );
+      const trackId = trackResult.insertId;
+
+      // Save per-track credits
+      const trackCredits = Array.isArray(t.credits) ? t.credits : [];
+      for (const c of trackCredits) {
+        if (!c.name) continue;
+        await db.query(
+          'INSERT INTO credits (song_id, track_id, role, name) VALUES (?, ?, ?, ?)',
+          [songId, trackId, c.role || 'Other', c.name]
+        );
+      }
     }
 
+    // Song-level credits (not tied to any track, track_id = NULL)
     const credits = req.body.credits ? JSON.parse(req.body.credits) : [];
     for (const c of credits) {
       if (!c.name) continue;
       await db.query(
-        'INSERT INTO credits (song_id, role, name) VALUES (?, ?, ?)',
+        'INSERT INTO credits (song_id, track_id, role, name) VALUES (?, NULL, ?, ?)',
         [songId, c.role || 'Other', c.name]
       );
     }
@@ -199,14 +260,63 @@ router.put('/:id', requireLogin, uploadSong, async (req, res) => {
        description ?? song[0].description, coverUrl, audioUrl, req.params.id]
     );
 
-    if (req.body.credits) {
+    const songId = Number(req.params.id);
+    const existingTracks = await db.query(
+      'SELECT * FROM tracks WHERE song_id = ? ORDER BY track_number ASC',
+      [songId]
+    );
+
+    if (req.body.tracks) {
+      const tracks = JSON.parse(req.body.tracks);
+      await db.query('DELETE FROM credits WHERE song_id = ?', [songId]);
+
+      for (let i = 0; i < tracks.length; i++) {
+        const t = tracks[i];
+        const trackAudioFile = files[`audio_${i}`]?.[0];
+        const trackAudioUrl = trackAudioFile
+          ? `/uploads/audio/${trackAudioFile.filename}`
+          : (existingTracks[i]?.audio_url ?? null);
+
+        let trackId;
+        if (existingTracks[i]) {
+          await db.query(
+            'UPDATE tracks SET track_number = ?, title = ?, duration = ?, audio_url = ? WHERE id = ?',
+            [i + 1, t.title || '', t.dur || null, trackAudioUrl, existingTracks[i].id]
+          );
+          trackId = existingTracks[i].id;
+        } else {
+          const trackResult = await db.query(
+            'INSERT INTO tracks (song_id, track_number, title, duration, audio_url) VALUES (?, ?, ?, ?, ?)',
+            [songId, i + 1, t.title || '', t.dur || null, trackAudioUrl]
+          );
+          trackId = trackResult.insertId;
+        }
+
+        const trackCredits = Array.isArray(t.credits) ? t.credits : [];
+        for (const c of trackCredits) {
+          if (!c.name) continue;
+          await db.query(
+            'INSERT INTO credits (song_id, track_id, role, name) VALUES (?, ?, ?, ?)',
+            [songId, trackId, c.role || 'Other', c.name]
+          );
+        }
+      }
+
+      if (tracks.length < existingTracks.length) {
+        const extraIds = existingTracks.slice(tracks.length).map(t => t.id);
+        await db.query(
+          `DELETE FROM tracks WHERE id IN (${extraIds.map(() => '?').join(',')})`,
+          extraIds
+        );
+      }
+    } else if (req.body.credits) {
       const credits = JSON.parse(req.body.credits);
-      await db.query('DELETE FROM credits WHERE song_id = ?', [req.params.id]);
+      await db.query('DELETE FROM credits WHERE song_id = ?', [songId]);
       for (const c of credits) {
         if (!c.name) continue;
         await db.query(
-          'INSERT INTO credits (song_id, role, name) VALUES (?, ?, ?)',
-          [req.params.id, c.role || 'Other', c.name]
+          'INSERT INTO credits (song_id, track_id, role, name) VALUES (?, NULL, ?, ?)',
+          [songId, c.role || 'Other', c.name]
         );
       }
     }
