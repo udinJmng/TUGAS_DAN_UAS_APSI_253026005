@@ -14,7 +14,13 @@ const USE_API = import.meta.env.VITE_USE_API === 'true'
 
 // ─── Types ────────────────────────────────────────────────────────────────
 interface Credit { role: string; name: string }
-interface Track  { title: string; dur: string; audioName?: string; audioData?: string; audio_url?: string; credits?: Credit[] }
+interface Track  {
+  id?: number; title: string; dur: string
+  audioName?: string; audioData?: string; audio_url?: string; credits?: Credit[]
+  likes?: number[]; reposts?: number[]
+  likeCount?: number; repostCount?: number
+  likedByMe?: boolean; repostedByMe?: boolean
+}
 interface Comment { id: number; userId: number; user: string; avatar: string; text: string; ts: number; deleted: boolean }
 interface Song {
   id: number; title: string; artist: string; userId: number
@@ -22,6 +28,8 @@ interface Song {
   audio_url?: string   // for singles — real file served by API
   likes: number[]; reposts: number[]; comments: Comment[]
   plays: number; deleted: boolean; tracks: Track[]; credits: Credit[]
+  albumLikeCount?: number; albumRepostCount?: number
+  albumLikedByMe?: boolean; albumRepostedByMe?: boolean
 }
 interface User {
   id: number; name: string; username: string; email: string; password: string
@@ -33,7 +41,7 @@ type AdminTab = 'users' | 'songs' | 'comments'
 
 interface PlayerState {
   queue: Song[]; index: number; isPlaying: boolean; progress: number
-  currentSong: Song | null; trackIndex: number
+  currentSong: Song | null; trackIndex: number; shuffle: boolean
 }
 interface AppState {
   currentUser: User | null; users: User[]; songs: Song[]
@@ -110,6 +118,18 @@ const GENRE_COLORS: Record<string,[string,string]> = {
 }
 const CREDIT_ROLES = ['Producer','Songwriter','Composer','Mix & Master','Mixing','Mastering','Vocalist','Lead Guitar','Rhythm Guitar','Bass Guitar','Drums','Piano','Keyboard','Synth Programming','Strings','Brass','Percussion','Backing Vocals','Feature','Recorded by','A&R','Other']
 
+/** Track indices that have audio — next/prev/shuffle stay within this list only */
+function playableTrackIndices(song: Song | null): number[] {
+  if (!song) return []
+  if (song.type === 'album' && song.tracks?.length) {
+    const indices = song.tracks
+      .map((t, i) => (t.audio_url || t.audioData) ? i : -1)
+      .filter(i => i >= 0)
+    return indices.length ? indices : song.tracks.map((_, i) => i)
+  }
+  return [0]
+}
+
 // ─── Reducer ──────────────────────────────────────────────────────────────
 type Action =
   | { type: 'LOGIN'; user: User }
@@ -119,14 +139,15 @@ type Action =
   | { type: 'NAV_BACK' }
   | { type: 'NAV_FWD' }
   | { type: 'OPEN_SONG'; song: Song }
-  | { type: 'TOGGLE_LIKE'; songId: number; userId: number }
-  | { type: 'TOGGLE_REPOST'; songId: number; userId: number }
+  | { type: 'TOGGLE_LIKE'; songId: number; userId: number; trackIndex?: number }
+  | { type: 'TOGGLE_REPOST'; songId: number; userId: number; trackIndex?: number }
   | { type: 'POST_COMMENT'; songId: number; comment: Comment }
   | { type: 'DELETE_COMMENT'; songId: number; commentId: number }
   | { type: 'PLAY_SONG'; songId: number; trackIndex?: number }
   | { type: 'TOGGLE_PLAY' }
   | { type: 'NEXT_SONG' }
   | { type: 'PREV_SONG' }
+  | { type: 'TOGGLE_SHUFFLE' }
   | { type: 'SET_PROGRESS'; progress: number }
   | { type: 'PLAYER_LIKE'; userId: number }
   | { type: 'TOAST'; msg: string }
@@ -148,7 +169,7 @@ const INITIAL_STATE: AppState = {
   songs: USE_API ? [] : INITIAL_SONGS,
   page: 'home', prevPage: 'home', navHistory: ['home'], navPos: 0,
   currentDetailSong: null, adminTab: 'users',
-  player: { queue: [], index: -1, isPlaying: false, progress: 0, currentSong: null, trackIndex: 0 },
+  player: { queue: [], index: -1, isPlaying: false, progress: 0, currentSong: null, trackIndex: 0, shuffle: false },
   toastMsg: '', toastShow: false, nextSongId: 13, nextUserId: 8, nextCommentId: 100,
   editSongId: null,
 }
@@ -182,25 +203,83 @@ function reducer(state: AppState, action: Action): AppState {
     }
 
     case 'TOGGLE_LIKE': {
+      const toggleTrackLike = (tracks: Track[]) => tracks.map((t, i) => {
+        if (action.trackIndex !== undefined && i !== action.trackIndex) return t
+        if (action.trackIndex === undefined) return t
+        const likes = t.likes ?? []
+        const has = t.likedByMe ?? likes.includes(action.userId)
+        const count = t.likeCount ?? likes.length
+        return {
+          ...t,
+          likedByMe: !has,
+          likeCount: Math.max(0, count + (has ? -1 : 1)),
+          likes: has ? likes.filter(id => id !== action.userId) : [...likes, action.userId],
+        }
+      })
       const songs = state.songs.map(s => {
         if (s.id !== action.songId) return s
-        const has = s.likes.includes(action.userId)
-        return { ...s, likes: has ? s.likes.filter(id => id !== action.userId) : [...s.likes, action.userId] }
+        if (action.trackIndex !== undefined) {
+          return { ...s, tracks: toggleTrackLike(s.tracks) }
+        }
+        const has = s.albumLikedByMe ?? s.likes.includes(action.userId)
+        const count = s.albumLikeCount ?? s.likes.length
+        return {
+          ...s,
+          albumLikedByMe: !has,
+          albumLikeCount: Math.max(0, count + (has ? -1 : 1)),
+          likes: has ? s.likes.filter(id => id !== action.userId) : [...s.likes, action.userId],
+        }
       })
       const det = state.currentDetailSong?.id === action.songId
         ? songs.find(s => s.id === action.songId) ?? state.currentDetailSong : state.currentDetailSong
-      return { ...state, songs, currentDetailSong: det ?? null }
+      const playerSong = state.player.currentSong?.id === action.songId
+        ? songs.find(s => s.id === action.songId) ?? state.player.currentSong : state.player.currentSong
+      return {
+        ...state,
+        songs,
+        currentDetailSong: det ?? null,
+        player: { ...state.player, currentSong: playerSong },
+      }
     }
 
     case 'TOGGLE_REPOST': {
+      const toggleTrackRepost = (tracks: Track[]) => tracks.map((t, i) => {
+        if (action.trackIndex !== undefined && i !== action.trackIndex) return t
+        if (action.trackIndex === undefined) return t
+        const reposts = t.reposts ?? []
+        const has = t.repostedByMe ?? reposts.includes(action.userId)
+        const count = t.repostCount ?? reposts.length
+        return {
+          ...t,
+          repostedByMe: !has,
+          repostCount: Math.max(0, count + (has ? -1 : 1)),
+          reposts: has ? reposts.filter(id => id !== action.userId) : [...reposts, action.userId],
+        }
+      })
       const songs = state.songs.map(s => {
         if (s.id !== action.songId) return s
-        const has = s.reposts.includes(action.userId)
-        return { ...s, reposts: has ? s.reposts.filter(id => id !== action.userId) : [...s.reposts, action.userId] }
+        if (action.trackIndex !== undefined) {
+          return { ...s, tracks: toggleTrackRepost(s.tracks) }
+        }
+        const has = s.albumRepostedByMe ?? s.reposts.includes(action.userId)
+        const count = s.albumRepostCount ?? s.reposts.length
+        return {
+          ...s,
+          albumRepostedByMe: !has,
+          albumRepostCount: Math.max(0, count + (has ? -1 : 1)),
+          reposts: has ? s.reposts.filter(id => id !== action.userId) : [...s.reposts, action.userId],
+        }
       })
       const det = state.currentDetailSong?.id === action.songId
         ? songs.find(s => s.id === action.songId) ?? state.currentDetailSong : state.currentDetailSong
-      return { ...state, songs, currentDetailSong: det ?? null }
+      const playerSong = state.player.currentSong?.id === action.songId
+        ? songs.find(s => s.id === action.songId) ?? state.player.currentSong : state.player.currentSong
+      return {
+        ...state,
+        songs,
+        currentDetailSong: det ?? null,
+        player: { ...state.player, currentSong: playerSong },
+      }
     }
 
     case 'POST_COMMENT': {
@@ -226,33 +305,65 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, currentDetailSong: action.song }
 
     case 'PLAY_SONG': {
-      const queue = state.songs.filter(s => !s.deleted)
-      const idx   = queue.findIndex(s => s.id === action.songId)
-      if (idx === -1) return state
+      const baseSong = state.songs.find(s => s.id === action.songId && !s.deleted)
+      if (!baseSong) return state
       const songs = state.songs.map(s => s.id === action.songId ? { ...s, plays: s.plays + 1 } : s)
       // Merge tracks from currentDetailSong — list endpoint songs have no tracks[]
-      const baseSong = queue[idx]
       const detailTracks = state.currentDetailSong?.id === action.songId ? state.currentDetailSong.tracks : null
       const currentSong = detailTracks?.length ? { ...baseSong, tracks: detailTracks } : baseSong
-      const trackIndex = action.trackIndex ?? 0
-      return { ...state, songs, player: { queue, index: idx, isPlaying: true, progress: 0, currentSong, trackIndex } }
+      const playable = playableTrackIndices(currentSong)
+      const trackIndex = playable.includes(action.trackIndex ?? 0) ? (action.trackIndex ?? 0) : playable[0]
+      // Queue scoped to current album/single only — next/prev never leave this context
+      return {
+        ...state,
+        songs,
+        player: {
+          ...state.player,
+          queue: [currentSong],
+          index: 0,
+          isPlaying: true,
+          progress: 0,
+          currentSong,
+          trackIndex,
+        },
+      }
     }
 
     case 'TOGGLE_PLAY':
       return { ...state, player: { ...state.player, isPlaying: !state.player.isPlaying } }
 
+    case 'TOGGLE_SHUFFLE':
+      return { ...state, player: { ...state.player, shuffle: !state.player.shuffle } }
+
     case 'NEXT_SONG': {
-      const { queue, index } = state.player
-      if (!queue.length) return state
-      const nextIdx = (index + 1) % queue.length
-      return { ...state, player: { ...state.player, index: nextIdx, currentSong: queue[nextIdx], progress: 0, isPlaying: true, trackIndex: 0 } }
+      const { currentSong, trackIndex, shuffle } = state.player
+      if (!currentSong) return state
+      const playable = playableTrackIndices(currentSong)
+      if (playable.length <= 1) {
+        return { ...state, player: { ...state.player, progress: 0, isPlaying: true, trackIndex: playable[0] ?? 0 } }
+      }
+      let nextTrack: number
+      if (shuffle) {
+        const others = playable.filter(i => i !== trackIndex)
+        nextTrack = others.length ? others[Math.floor(Math.random() * others.length)] : trackIndex
+      } else {
+        const pos = playable.indexOf(trackIndex)
+        const nextPos = pos === -1 ? 0 : (pos + 1) % playable.length
+        nextTrack = playable[nextPos]
+      }
+      return { ...state, player: { ...state.player, trackIndex: nextTrack, progress: 0, isPlaying: true } }
     }
 
     case 'PREV_SONG': {
-      const { queue, index } = state.player
-      if (!queue.length) return state
-      const prevIdx = (index - 1 + queue.length) % queue.length
-      return { ...state, player: { ...state.player, index: prevIdx, currentSong: queue[prevIdx], progress: 0, isPlaying: true, trackIndex: 0 } }
+      const { currentSong, trackIndex } = state.player
+      if (!currentSong) return state
+      const playable = playableTrackIndices(currentSong)
+      if (playable.length <= 1) {
+        return { ...state, player: { ...state.player, progress: 0, isPlaying: true } }
+      }
+      const pos = playable.indexOf(trackIndex)
+      const prevPos = pos <= 0 ? playable.length - 1 : pos - 1
+      return { ...state, player: { ...state.player, trackIndex: playable[prevPos], progress: 0, isPlaying: true } }
     }
 
     case 'SET_PROGRESS':
@@ -506,21 +617,42 @@ function LibraryPage({ songs, user, dispatch, onPlay, onOpen, onDelete }: {
 function ProfilePage({ user, songs, dispatch, onOpen, onDelete, onUpdateProfile }: {
   user: User; songs: Song[]; dispatch: React.Dispatch<Action>
   onOpen:(s:Song)=>void; onDelete:(id:number)=>void
-  onUpdateProfile:(data:Partial<User>&{old_password?:string;new_password?:string})=>Promise<void>
+  onUpdateProfile:(data:Partial<User>&{old_password?:string;new_password?:string;avatarFile?:File|null})=>Promise<void>
 }) {
   const [editing, setEditing] = useState(false)
   const [name, setName] = useState(user.name); const [uname, setUname] = useState(user.username)
-  const [bio, setBio] = useState(user.bio); const [avatar, setAvatar] = useState(user.avatar)
+  const [bio, setBio] = useState(user.bio)
+  const [avatarPreview, setAvatarPreview] = useState(user.avatar)
+  const [avatarFile, setAvatarFile] = useState<File | null>(null)
   const [oldPass, setOldPass] = useState(''); const [newPass, setNewPass] = useState('')
+  const avatarRef = useRef<HTMLInputElement>(null)
 
   const mySongs = songs.filter(s => !s.deleted && s.userId === user.id)
+
+  const openEdit = () => {
+    setName(user.name); setUname(user.username); setBio(user.bio)
+    setAvatarPreview(user.avatar); setAvatarFile(null)
+    setOldPass(''); setNewPass('')
+    setEditing(true)
+  }
+
+  const handleAvatarFile = (file: File) => {
+    setAvatarFile(file)
+    const r = new FileReader()
+    r.onload = e => setAvatarPreview(e.target?.result as string)
+    r.readAsDataURL(file)
+  }
+
   const onSave = () => {
     if (!name) { dispatch({ type:'TOAST', msg:'⚠️ Name cannot be empty' }); return }
     if (oldPass && newPass && oldPass !== user.password) { dispatch({ type:'TOAST', msg:'❌ Wrong password' }); return }
-    const data: Partial<User> & { old_password?:string; new_password?:string } = { name, username:uname, bio, avatar }
+    const data: Partial<User> & { old_password?:string; new_password?:string; avatarFile?: File | null } = {
+      name, username: uname, bio, avatar: avatarPreview,
+    }
+    if (avatarFile) data.avatarFile = avatarFile
     if (oldPass && newPass) { data.old_password = oldPass; data.new_password = newPass }
     onUpdateProfile(data)
-    setEditing(false); setOldPass(''); setNewPass('')
+    setEditing(false); setOldPass(''); setNewPass(''); setAvatarFile(null)
   }
   const onEdit2 = (id: number) => { dispatch({ type:'SET_EDIT_SONG', id }); dispatch({ type:'NAV', page:'upload' }) }
 
@@ -537,7 +669,7 @@ function ProfilePage({ user, songs, dispatch, onOpen, onDelete, onUpdateProfile 
       </div>
       <div className="page-content" style={{ paddingTop:24 }}>
         <div style={{ display:'flex',alignItems:'center',gap:12,marginBottom:24 }}>
-          <button className="btn btn-green" onClick={()=>setEditing(true)}>Edit Profile</button>
+          <button className="btn btn-green" onClick={openEdit}>Edit Profile</button>
           {user.role==='admin' && <span className="badge-green">ADMIN</span>}
         </div>
         <h2 className="h2">My Music</h2>
@@ -551,7 +683,34 @@ function ProfilePage({ user, songs, dispatch, onOpen, onDelete, onUpdateProfile 
             <div className="form-row"><label className="form-label">Display Name</label><input className="form-input" value={name} onChange={e=>setName(e.target.value)} /></div>
             <div className="form-row"><label className="form-label">Username</label><input className="form-input" value={uname} onChange={e=>setUname(e.target.value)} /></div>
             <div className="form-row"><label className="form-label">Bio</label><textarea className="form-input" value={bio} onChange={e=>setBio(e.target.value)} /></div>
-            <div className="form-row"><label className="form-label">Avatar URL</label><input className="form-input" value={avatar} onChange={e=>setAvatar(e.target.value)} placeholder="https://..." /></div>
+            <div className="form-row">
+              <label className="form-label">Avatar</label>
+              <div style={{ display:'flex',alignItems:'center',gap:14 }}>
+                <div
+                  className="avatar"
+                  style={{ width:72,height:72,fontSize:26,cursor:'pointer',flexShrink:0,border:'2px dashed var(--subtle)' }}
+                  onClick={()=>avatarRef.current?.click()}
+                  onDragOver={e=>e.preventDefault()}
+                  onDrop={e=>{e.preventDefault();const f=e.dataTransfer.files[0];if(f?.type.startsWith('image/'))handleAvatarFile(f)}}
+                >
+                  {avatarPreview ? <img src={avatarPreview} alt="" /> : initials(name || user.name)}
+                </div>
+                <div style={{ flex:1,minWidth:0 }}>
+                  <button type="button" className="btn btn-outline btn-sm" onClick={()=>avatarRef.current?.click()}>
+                    <i className="fas fa-image" /> Choose image
+                  </button>
+                  <p style={{ fontSize:11,color:'var(--subtle)',marginTop:6 }}>JPG · PNG · WEBP · max 5 MB</p>
+                  {avatarPreview && (
+                    <button type="button" style={{ fontSize:12,color:'var(--subtle)',background:'none',border:'none',cursor:'pointer',marginTop:4,padding:0 }}
+                      onClick={()=>{setAvatarPreview('');setAvatarFile(null)}}>
+                      Remove avatar
+                    </button>
+                  )}
+                </div>
+                <input ref={avatarRef} type="file" accept="image/*" style={{ display:'none' }}
+                  onChange={e=>{const f=e.target.files?.[0];if(f)handleAvatarFile(f)}} />
+              </div>
+            </div>
             <div style={{ borderTop:'1px solid rgba(255,255,255,.1)',paddingTop:20,marginTop:4 }}>
               <p style={{ fontSize:13,fontWeight:700,marginBottom:12 }}>Change Password</p>
               <div className="form-row"><input className="form-input" type="password" placeholder="Current password" value={oldPass} onChange={e=>setOldPass(e.target.value)} /></div>
@@ -636,14 +795,17 @@ function AdminPage({ users, songs, tab, currentUser, dispatch, onBanToggle, onDe
 // ─── Page: Song Detail ────────────────────────────────────────────────────
 function SongDetailPage({ song, songs, user, player, dispatch, onLike, onRepost, onComment, onDeleteComment, onPlay }: {
   song: Song; songs: Song[]; user: User; player: PlayerState; dispatch: React.Dispatch<Action>
-  onLike:(id:number)=>void; onRepost:(id:number)=>void
+  onLike:(id:number, trackIndex?:number, trackId?:number)=>void
+  onRepost:(id:number, trackIndex?:number, trackId?:number)=>void
   onComment:(songId:number,text:string)=>void; onDeleteComment:(songId:number,commentId:number)=>void
   onPlay:(id:number, trackIndex?:number)=>void
 }) {
   const [commentText, setCommentText] = useState('')
   const [c1, c2] = GENRE_COLORS[song.genre] ?? GENRE_COLORS['Other']
-  const liked    = song.likes.includes(user.id)
-  const reposted = song.reposts.includes(user.id)
+  const liked    = song.albumLikedByMe ?? song.likes.includes(user.id)
+  const reposted = song.albumRepostedByMe ?? song.reposts.includes(user.id)
+  const likeCount = song.albumLikeCount ?? song.likes.length
+  const repostCount = song.albumRepostCount ?? song.reposts.length
   const isPlaying = player.currentSong?.id === song.id && player.isPlaying
   const activeComments = song.comments.filter(c => !c.deleted)
 
@@ -696,10 +858,10 @@ function SongDetailPage({ song, songs, user, player, dispatch, onLike, onRepost,
           <i className={`fas ${isPlaying?'fa-pause':'fa-play'}`} />{isPlaying?'Pause':'Play'}
         </button>
         <button className={`action-btn-icon${liked?' active':''}`} onClick={()=>onLike(song.id)}>
-          <i className={`${liked?'fas':'far'} fa-heart`} /><span>{song.likes.length}</span>
+          <i className={`${liked?'fas':'far'} fa-heart`} /><span>{likeCount}</span>
         </button>
         <button className={`action-btn-icon${reposted?' active':''}`} onClick={()=>onRepost(song.id)}>
-          <i className="fas fa-repeat" /><span>{song.reposts.length}</span>
+          <i className="fas fa-repeat" /><span>{repostCount}</span>
         </button>
         <button className="action-btn-icon">
           <i className="fas fa-comment" /><span>{activeComments.length}</span>
@@ -730,7 +892,7 @@ function SongDetailPage({ song, songs, user, player, dispatch, onLike, onRepost,
       {/* Track listing — single shows 1 row, album shows all tracks */}
       <div className="song-detail-tracklist">
         <div className="tracklist-header">
-          <span style={{ textAlign:'center' }}>#</span><span>Title</span><span style={{ textAlign:'center' }}>Likes</span><span style={{ textAlign:'right' }}>Duration</span>
+          <span style={{ textAlign:'center' }}>#</span><span>Title</span><span style={{ textAlign:'center' }}>Actions</span><span style={{ textAlign:'right' }}>Duration</span>
         </div>
         {song.type === 'single' ? (
           // Single — one row for the song itself
@@ -755,6 +917,10 @@ function SongDetailPage({ song, songs, user, player, dispatch, onLike, onRepost,
           // Album — show tracks stored in DB (song.tracks[])
           song.tracks.length > 0 ? song.tracks.map((t, i) => {
             const isActive = player.currentSong?.id === song.id && (player.trackIndex ?? 0) === i && player.isPlaying
+            const trackLiked = t.likedByMe ?? (t.likes ?? []).includes(user.id)
+            const trackReposted = t.repostedByMe ?? (t.reposts ?? []).includes(user.id)
+            const trackLikeCount = t.likeCount ?? (t.likes ?? []).length
+            const trackRepostCount = t.repostCount ?? (t.reposts ?? []).length
             return (
             <div key={i} className={`tracklist-row${isActive ? ' playing' : ''}`} onClick={()=>{ if(t.audio_url) onPlay(song.id, i) }}>
               <span className="tracklist-num">
@@ -766,7 +932,14 @@ function SongDetailPage({ song, songs, user, player, dispatch, onLike, onRepost,
                 <div className="tracklist-title">{t.title}</div>
                 <div className="tracklist-artist">{song.artist}</div>
               </div>
-              <div className="tracklist-actions" />
+              <div className="tracklist-actions" style={{ display:'flex',gap:6,justifyContent:'center' }}>
+                <button className={`action-btn-icon${trackLiked?' active':''}`} onClick={e=>{e.stopPropagation();onLike(song.id,i,t.id)}} style={{ fontSize:12,gap:4 }}>
+                  <i className={`${trackLiked?'fas':'far'} fa-heart`} style={{ fontSize:14 }} /><span>{trackLikeCount}</span>
+                </button>
+                <button className={`action-btn-icon${trackReposted?' active':''}`} onClick={e=>{e.stopPropagation();onRepost(song.id,i,t.id)}} style={{ fontSize:12,gap:4 }}>
+                  <i className="fas fa-repeat" style={{ fontSize:14 }} /><span>{trackRepostCount}</span>
+                </button>
+              </div>
               <span className="tracklist-dur">{t.dur ?? ''}</span>
             </div>
           )}) : (
@@ -825,19 +998,64 @@ function UploadPage({ user, songs, editSongId, dispatch, toast }: {
     return [{ id:0, title:'', audioName:'', audioData:'', audioFile:null, dur:'', credits:[{ role:'Producer', name:user.name }], open:true }]
   })
 
-  const [songCredits, setSongCredits] = useState<Credit[]>(() => {
-    if (editSong) return editSong.credits ?? []
-    return [{ role: 'Producer', name: '' }]
-  })
-  const addSongCredit    = () => setSongCredits(p => [...p, { role: 'Producer', name: '' }])
-  const updateSongCredit = (i: number, patch: Partial<Credit>) => setSongCredits(p => p.map((c,ci) => ci===i ? {...c,...patch} : c))
-  const removeSongCredit = (i: number) => setSongCredits(p => p.filter((_,ci) => ci!==i))
-
   const isAlbum = type === 'album'
   const coverRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    if (editSong) { setTitle(editSong.title); setType(editSong.type); setGenre(editSong.genre); setDesc(editSong.desc); setCover(editSong.cover) }
+    if (!editSong) return
+    setTitle(editSong.title)
+    setType(editSong.type)
+    setGenre(editSong.genre)
+    setDesc(editSong.desc)
+    setCover(editSong.cover)
+
+    const audioDisplayName = (url: string | undefined, i: number) =>
+      url ? (url.split('/').pop()?.replace(/^audio_\d+_[a-z0-9]+\./, 'track_'+(i+1)+'.') ?? '') : ''
+
+    const populateTracks = (s: Song) => {
+      const hasPerTrackCredits = s.tracks.some(t => t.credits?.length)
+      if (s.type === 'album') {
+        if (s.tracks.length > 0) {
+          setTracks(s.tracks.map((t, i) => ({
+            id: i,
+            title:     t.title,
+            audioName: audioDisplayName(t.audio_url, i),
+            audioData: '', audioFile: null,
+            dur:       t.dur ?? '',
+            credits:   t.credits?.length ? t.credits
+              : (!hasPerTrackCredits && i === 0 && s.credits?.length ? s.credits : [{ role: 'Producer', name: '' }]),
+            open: false,
+          })))
+        }
+      } else {
+        const t = s.tracks[0]
+        const trackCredits = t?.credits?.length ? t.credits : (s.credits?.length ? s.credits : [{ role: 'Producer', name: '' }])
+        setTracks([{
+          id: 0,
+          title:     t?.title ?? '',
+          audioName: audioDisplayName(t?.audio_url ?? s.audio_url, 0),
+          audioData: '', audioFile: null,
+          dur:       t?.dur ?? '',
+          credits:   trackCredits,
+          open: true,
+        }])
+      }
+    }
+
+    if (USE_API) {
+      // Always fetch full detail — list endpoint may have stale/incomplete data
+      apiCall(() => songApi.get(editSong.id), (full) => {
+        const fullLocal = apiSongToLocal(full)
+        setTitle(fullLocal.title)
+        setType(fullLocal.type)
+        setGenre(fullLocal.genre)
+        setDesc(fullLocal.desc)
+        if (fullLocal.cover) setCover(fullLocal.cover)
+        populateTracks(fullLocal)
+      })
+    } else {
+      populateTracks(editSong)
+    }
   }, [editSongId])
 
   const handleCoverFile = (file: File) => {
@@ -879,8 +1097,8 @@ function UploadPage({ user, songs, editSongId, dispatch, toast }: {
   const onSubmit = async () => {
     if (!title) { toast('⚠️ Title required'); return }
 
-    // Song-level credits + per-track credits merged (deduped)
-    const allC: Credit[] = [...songCredits.filter(c => c.name)]
+    // Aggregate per-track credits for song-level display (deduped)
+    const allC: Credit[] = []
     tracks.forEach(t => t.credits.forEach(c => { if (c.name && !allC.find(x=>x.role===c.role&&x.name===c.name)) allC.push(c) }))
 
     // For singles, always include a track row so dur gets stored in DB
@@ -1020,21 +1238,6 @@ function UploadPage({ user, songs, editSongId, dispatch, toast }: {
           ))}
         </div>
 
-        {/* Song-level Credits */}
-        <div className="form-row" style={{ marginTop:20, marginBottom:0 }}>
-          <div style={{ display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10 }}>
-            <label className="form-label" style={{ marginBottom:0 }}>Credits</label>
-            <button className="add-track-btn" style={{ width:'auto',padding:0 }} onClick={addSongCredit}><i className="fas fa-circle-plus" style={{ fontSize:15 }} />Add credit</button>
-          </div>
-          {songCredits.map((c, i) => (
-            <div key={i} className="credit-item" style={{ marginBottom:8 }}>
-              <select className="credit-role-select" value={c.role} onChange={e=>updateSongCredit(i,{role:e.target.value})}>{CREDIT_ROLES.map(r=><option key={r}>{r}</option>)}</select>
-              <input className="credit-name-input" placeholder="Name…" value={c.name} onChange={e=>updateSongCredit(i,{name:e.target.value})} />
-              <button style={{ color:'var(--subtle)',background:'none',border:'none',cursor:'pointer' }} onClick={()=>removeSongCredit(i)}><i className="fas fa-circle-minus" style={{ fontSize:14 }} /></button>
-            </div>
-          ))}
-        </div>
-
         <div style={{ display:'flex',gap:10,marginTop:20 }}>
           <button className="btn btn-green" onClick={onSubmit}><i className={`fas ${editSong?'fa-floppy-disk':'fa-cloud-arrow-up'}`} />{editSong?'Save Changes':'Upload'}</button>
           {editSong && <button className="btn btn-outline" onClick={()=>{dispatch({type:'SET_EDIT_SONG',id:null});dispatch({type:'NAV',page:'profile'})}}>Cancel</button>}
@@ -1046,7 +1249,7 @@ function UploadPage({ user, songs, editSongId, dispatch, toast }: {
 
 // ─── Player Bar ───────────────────────────────────────────────────────────
 function PlayerBar({ player, user, dispatch }: { player: PlayerState; user: User | null; dispatch: React.Dispatch<Action> }) {
-  const { currentSong: s, isPlaying, progress, queue } = player
+  const { currentSong: s, isPlaying, progress, shuffle } = player
 
   const audioRef = useRef<HTMLAudioElement>(null)
 
@@ -1137,9 +1340,16 @@ function PlayerBar({ player, user, dispatch }: { player: PlayerState; user: User
       {/* Center */}
       <div className="player-center">
         <div className="player-controls">
-          <button className="player-ctrl"><i className="fas fa-shuffle" /></button>
-          <button className="player-ctrl" onClick={()=>dispatch({type:'PREV_SONG'})}><i className="fas fa-backward-step" /></button>
-          <button className="player-play" onClick={()=>{if(queue.length)dispatch({type:'TOGGLE_PLAY'})}}>
+          <button className="player-ctrl" onClick={()=>dispatch({type:'TOGGLE_SHUFFLE'})} style={{ color: shuffle ? 'var(--gold)' : undefined }} title="Shuffle tracks"><i className="fas fa-shuffle" /></button>
+          <button className="player-ctrl" onClick={()=>{
+            if (progress > 2 && s) {
+              dispatch({ type: 'SET_PROGRESS', progress: 0 })
+              if (audioRef.current) audioRef.current.currentTime = 0
+            } else {
+              dispatch({ type: 'PREV_SONG' })
+            }
+          }}><i className="fas fa-backward-step" /></button>
+          <button className="player-play" onClick={()=>{if(s)dispatch({type:'TOGGLE_PLAY'})}}>
             <i className={`fas ${isPlaying?'fa-pause':'fa-play'}`} style={{ color:'var(--black)',fontSize:16 }} />
           </button>
           <button className="player-ctrl" onClick={()=>dispatch({type:'NEXT_SONG'})}><i className="fas fa-forward-step" /></button>
@@ -1189,11 +1399,36 @@ function apiSongToLocal(s: ApiSong): Song {
     comments:  [],
     plays:     s.play_count,
     deleted:   Boolean(s.is_deleted),
+    albumLikeCount: s.album_likes_count,
+    albumRepostCount: s.album_reposts_count,
+    albumLikedByMe: s.album_liked_by_me,
+    albumRepostedByMe: s.album_reposted_by_me,
     tracks:    (s.tracks ?? []).length > 0
-      ? (s.tracks ?? []).map(t => ({ title:t.title, dur:t.duration ?? '', audio_url:resolveUrl(t.audio_url) }))
+      ? (s.tracks ?? []).map(t => ({
+          id: t.id,
+          title: t.title,
+          dur: t.duration ?? '',
+          audio_url: resolveUrl(t.audio_url),
+          likes: [],
+          reposts: [],
+          likeCount: t.likes_count ?? 0,
+          repostCount: t.reposts_count ?? 0,
+          likedByMe: t.liked_by_me,
+          repostedByMe: t.reposted_by_me,
+          credits: (s.credits ?? [])
+            .filter(c => c.track_id === t.id)
+            .map(c => ({ role: c.role, name: c.name })),
+        }))
       // list endpoint has no tracks[] but gives first_track_dur — create synthetic entry for singles only
-      : (s.type === 'single' && s.first_track_dur) ? [{ title: s.title, dur: s.first_track_dur, audio_url: resolveUrl(s.audio_url) }] : [],
-    credits: (s.credits ?? []).map(c => ({ role: c.role, name: c.name })),
+      : (s.type === 'single' && s.first_track_dur) ? [{
+          title: s.title,
+          dur: s.first_track_dur,
+          audio_url: resolveUrl(s.audio_url),
+          credits: (s.credits ?? []).map(c => ({ role: c.role, name: c.name })),
+        }] : [],
+    credits: (s.credits ?? [])
+      .filter(c => !c.track_id)
+      .map(c => ({ role: c.role, name: c.name })),
   }
 }
 
@@ -1328,36 +1563,42 @@ export default function App() {
     if (USE_API) apiCall(() => songApi.get(songId))
   }, [USE_API])
 
-  const handleLike = useCallback(async (songId: number) => {
+  const handleLike = useCallback(async (songId: number, trackIndex?: number, trackId?: number) => {
     if (!user) return
     if (USE_API) {
-      dispatch({ type:'TOGGLE_LIKE', songId, userId: user.id })   // optimistic
+      dispatch({ type:'TOGGLE_LIKE', songId, userId: user.id, trackIndex })   // optimistic
       const res = await apiCall(
-        () => interactionApi.toggleLike(songId),
+        () => interactionApi.toggleLike(songId, trackId),
         undefined,
-        (err) => { dispatch({ type:'TOGGLE_LIKE', songId, userId: user.id }); toast(`❌ ${err}`) }  // rollback on error
+        (err) => { dispatch({ type:'TOGGLE_LIKE', songId, userId: user.id, trackIndex }); toast(`❌ ${err}`) }
       )
       if (res) toast(res.liked ? '❤️ Liked!' : '💔 Unliked')
     } else {
-      const liked = songs.find(s=>s.id===songId)?.likes.includes(user.id)
-      dispatch({ type:'TOGGLE_LIKE', songId, userId: user.id })
+      const song = songs.find(s => s.id === songId)
+      const liked = trackIndex !== undefined
+        ? song?.tracks[trackIndex]?.likes?.includes(user.id)
+        : song?.likes.includes(user.id)
+      dispatch({ type:'TOGGLE_LIKE', songId, userId: user.id, trackIndex })
       toast(liked ? '💔 Unliked' : '❤️ Liked!')
     }
   }, [USE_API, user, songs, toast])
 
-  const handleRepost = useCallback(async (songId: number) => {
+  const handleRepost = useCallback(async (songId: number, trackIndex?: number, trackId?: number) => {
     if (!user) return
     if (USE_API) {
-      dispatch({ type:'TOGGLE_REPOST', songId, userId: user.id })
+      dispatch({ type:'TOGGLE_REPOST', songId, userId: user.id, trackIndex })
       const res = await apiCall(
-        () => interactionApi.toggleRepost(songId),
+        () => interactionApi.toggleRepost(songId, trackId),
         undefined,
-        (err) => { dispatch({ type:'TOGGLE_REPOST', songId, userId: user.id }); toast(`❌ ${err}`) }
+        (err) => { dispatch({ type:'TOGGLE_REPOST', songId, userId: user.id, trackIndex }); toast(`❌ ${err}`) }
       )
       if (res) toast(res.reposted ? '🔁 Reposted!' : '↩️ Repost removed')
     } else {
-      const reposted = songs.find(s=>s.id===songId)?.reposts.includes(user.id)
-      dispatch({ type:'TOGGLE_REPOST', songId, userId: user.id })
+      const song = songs.find(s => s.id === songId)
+      const reposted = trackIndex !== undefined
+        ? song?.tracks[trackIndex]?.reposts?.includes(user.id)
+        : song?.reposts.includes(user.id)
+      dispatch({ type:'TOGGLE_REPOST', songId, userId: user.id, trackIndex })
       toast(reposted ? '↩️ Repost removed' : '🔁 Reposted!')
     }
   }, [USE_API, user, songs, toast])
@@ -1432,38 +1673,61 @@ export default function App() {
     }
   }, [USE_API, toast])
 
-  const handleUpdateProfile = useCallback(async (data: Partial<User> & { old_password?:string; new_password?:string }) => {
+  const handleUpdateProfile = useCallback(async (data: Partial<User> & { old_password?:string; new_password?:string; avatarFile?: File | null }) => {
     if (!user) return
+    const { avatarFile, old_password, new_password, ...profileData } = data
+
     if (USE_API) {
+      const fd = new FormData()
+      const nameParts = (profileData.name ?? user.name).trim().split(/\s+/)
+      fd.append('first_name', nameParts[0])
+      fd.append('last_name', nameParts.slice(1).join(' ') || nameParts[0])
+      fd.append('username', profileData.username ?? user.username)
+      if (profileData.bio !== undefined) fd.append('bio', profileData.bio)
+      if (avatarFile) fd.append('avatar', avatarFile)
+      if (old_password) fd.append('old_password', old_password)
+      if (new_password) fd.append('new_password', new_password)
+
       await apiCall(
-        () => userApi.update({ ...data }),
-        () => {
-          dispatch({ type:'UPDATE_PROFILE', userId:user.id, data })
+        () => userApi.update(fd),
+        (res) => {
+          const updateData: Partial<User> = { ...profileData }
+          if (res.avatar_url) updateData.avatar = resolveUrl(res.avatar_url)
+          dispatch({ type:'UPDATE_PROFILE', userId:user.id, data: updateData })
           toast('✅ Profile updated!')
         },
         (err) => toast(`❌ ${err}`),
       )
     } else {
-      dispatch({ type:'UPDATE_PROFILE', userId:user.id, data })
+      const updateData: Partial<User> = { ...profileData }
+      if (avatarFile) {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const r = new FileReader()
+          r.onload = e => resolve(e.target?.result as string)
+          r.onerror = () => reject(new Error('Failed to read avatar'))
+          r.readAsDataURL(avatarFile)
+        })
+        updateData.avatar = dataUrl
+      }
+      dispatch({ type:'UPDATE_PROFILE', userId:user.id, data: updateData })
       toast('✅ Profile updated!')
     }
   }, [USE_API, user, toast])
 
-  // ─── Load song detail (tracks + comments) from API ─────────────────────
+  // ─── Load song detail (tracks + credits + comments) from API ────────────
   const handleOpenSong = useCallback(async (song: Song) => {
     dispatch({ type:'OPEN_SONG', song })
     if (!USE_API) return
-    // Fetch full song detail so tracks are populated (list endpoint omits them)
+    // Fetch full detail: includes credits[], tracks[] from DB
     const full = await apiCall(() => songApi.get(song.id))
     if (full) {
       const fullLocal = apiSongToLocal(full)
+      // Fetch real comments
+      const comments = await apiCall(() => interactionApi.getComments(song.id))
+      if (comments) {
+        fullLocal.comments = comments.map(c => apiCommentToLocal(c, song.id))
+      }
       dispatch({ type:'UPDATE_DETAIL_SONG', song: fullLocal })
-    }
-    // Fetch comments separately
-    const comments = await apiCall(() => interactionApi.getComments(song.id))
-    if (comments) {
-      const converted: Comment[] = comments.map(c => apiCommentToLocal(c, song.id))
-      dispatch({ type:'POST_COMMENT', songId: song.id, comment: converted[0] ?? { id:-1, userId:0, user:'', avatar:'', text:'__NOOP__', ts:0, deleted:true } })
     }
   }, [USE_API])
 

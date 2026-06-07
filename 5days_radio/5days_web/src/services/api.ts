@@ -59,13 +59,17 @@ export interface ApiSong {
   username: string; avatar_url: string | null
   likes_count: number; reposts_count: number; comments_count: number
   first_track_dur?: string | null   // duration of first track, from list endpoint
+  album_likes_count?: number; album_reposts_count?: number
+  album_liked_by_me?: boolean; album_reposted_by_me?: boolean
   tracks?: ApiTrack[]; credits?: ApiCredit[]
 }
 export interface ApiTrack {
   id: number; song_id: number; track_number: number
   title: string; duration: string | null; audio_url: string | null
+  likes_count?: number; reposts_count?: number
+  liked_by_me?: boolean; reposted_by_me?: boolean
 }
-export interface ApiCredit  { id: number; song_id: number; role: string; name: string }
+export interface ApiCredit  { id: number; song_id: number; track_id?: number | null; role: string; name: string }
 export interface ApiComment {
   id: number; user_id: number; username: string; avatar_url: string | null
   body: string; created_at: string
@@ -83,7 +87,10 @@ export const authApi = {
 export const userApi = {
   get:    (id: number)                                                                          => get<ApiUser>(`/users/${id}`),
   songs:  (id: number)                                                                          => get<ApiSong[]>(`/users/${id}/songs`),
-  update: (d: Partial<ApiUser> & { old_password?: string; new_password?: string })             => put<{ message: string }>('/users/me', d),
+  update: (d: Partial<ApiUser> & { old_password?: string; new_password?: string } | FormData) =>
+    d instanceof FormData
+      ? req<{ message: string; avatar_url?: string }>('PUT', '/users/me', d, true)
+      : put<{ message: string; avatar_url?: string }>('/users/me', d),
 }
 
 // ─── Songs ─────────────────────────────────────────────────────────────────
@@ -101,9 +108,9 @@ export const songApi = {
 
 // ─── Interactions ──────────────────────────────────────────────────────────
 export const interactionApi = {
-  toggleLike:    (songId: number)                          => post<{ liked:boolean; likes_count:number }>(`/songs/${songId}/like`),
-  getLike:       (songId: number)                          => get<{ liked:boolean; likes_count:number }>(`/songs/${songId}/likes`),
-  toggleRepost:  (songId: number)                          => post<{ reposted:boolean; reposts_count:number }>(`/songs/${songId}/repost`),
+  toggleLike:    (songId: number, trackId?: number)        => post<{ liked:boolean; likes_count:number; track_id?:number|null }>(`/songs/${songId}/like`, trackId ? { track_id: trackId } : {}),
+  getLike:       (songId: number, trackId?: number)        => get<{ liked:boolean; likes_count:number }>(`/songs/${songId}/likes${trackId ? `?track_id=${trackId}` : ''}`),
+  toggleRepost:  (songId: number, trackId?: number)        => post<{ reposted:boolean; reposts_count:number; track_id?:number|null }>(`/songs/${songId}/repost`, trackId ? { track_id: trackId } : {}),
   getComments:   (songId: number)                          => get<ApiComment[]>(`/songs/${songId}/comments`),
   postComment:   (songId: number, body: string)            => post<ApiComment>(`/songs/${songId}/comments`, { body }),
   deleteComment: (commentId: number)                       => del<{ message:string }>(`/comments/${commentId}`),
