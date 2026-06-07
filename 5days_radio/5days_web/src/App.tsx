@@ -116,7 +116,7 @@ const GENRE_COLORS: Record<string,[string,string]> = {
   'Hip-Hop':['#2d1a0d','#7d3a0f'], Pop:['#4d1a2d','#b5185c'], Rock:['#2d0d0d','#8b1a1a'],
   'R&B':['#1a1a3d','#3a3a8f'], Classical:['#2d2d1a','#6b6b2a'], Other:['#1a1a1a','#444'],
 }
-const CREDIT_ROLES = ['Producer','Songwriter','Composer','Mix & Master','Mixing','Mastering','Vocalist','Lead Guitar','Rhythm Guitar','Bass Guitar','Drums','Piano','Keyboard','Synth Programming','Strings','Brass','Percussion','Backing Vocals','Feature','Recorded by','A&R','Other']
+const CREDIT_ROLES = ['Producer','Songwriter','Composer','Mix & Master', 'Vocal Engineer / Mix', 'Mixing','Mastering','Vocalist','Lead Guitar','Rhythm Guitar','Bass Guitar','Drums','Piano','Keyboard','Synth Programming','Strings','Brass','Percussion','Backing Vocals','Feature','Recorded by','A&R','Other']
 
 /** Track indices that have audio — next/prev/shuffle stay within this list only */
 function playableTrackIndices(song: Song | null): number[] {
